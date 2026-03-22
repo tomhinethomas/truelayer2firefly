@@ -46,6 +46,26 @@ class Import2Firefly:
         labels.append(display_name)
         return labels
 
+    @staticmethod
+    def _is_duplicate_transaction_error(error: Exception) -> bool:
+        """Check whether an exception indicates a duplicate transaction in Firefly."""
+        message = str(error).lower()
+        return "422" in message and "duplicate of transaction" in message
+
+    @staticmethod
+    def _is_duplicate_transaction_response(response: Any) -> bool:
+        """Check whether a response body indicates a duplicate transaction."""
+        if response.status_code != 422:
+            return False
+        return "duplicate of transaction" in response.text.lower()
+
+    @staticmethod
+    def _normalize_iban(iban: str | None) -> str:
+        """Normalize IBAN by removing all whitespace for resilient matching."""
+        if not iban:
+            return ""
+        return "".join(iban.split())
+
     async def start_import(self) -> AsyncGenerator[Any, Any]:
         """Start the import process."""
 
@@ -122,7 +142,9 @@ class Import2Firefly:
                     else:
                         # Match accounts by IBAN (existing behaviour)
                         ff_iban = firefly_account["attributes"].get("iban")
-                        matched = tr_iban == ff_iban
+                        matched = self._normalize_iban(tr_iban) == self._normalize_iban(
+                            ff_iban
+                        )
 
                     if matched:
                         yield f"Matching account found: {tr_label}"
@@ -188,7 +210,9 @@ class Import2Firefly:
                                 continue
 
                             # Check if the IBAN matches
-                            if cp_iban == firefly_account["attributes"].get("iban"):
+                            if self._normalize_iban(cp_iban) == self._normalize_iban(
+                                firefly_account["attributes"].get("iban")
+                            ):
                                 yield f"Matching account found via IBAN: {txn['description']} - {cp_iban}"
                                 linked_account = firefly_account
                                 matching += 1
@@ -307,11 +331,26 @@ class Import2Firefly:
                             import_transaction
                         )
                     except Exception as e:
-                        yield f"Error creating transaction in Firefly: {e}"
+                        if self._is_duplicate_transaction_error(e):
+                            yield f"Transaction already exists: {txn['description']} - {txn['amount']} - {txn['timestamp']}"
+                        else:
+                            yield f"Error creating transaction in Firefly: {e}"
+
+                        await asyncio.sleep(0)
+                        yield {
+                            "type": "progress",
+                            "data": {
+                                "account": tr_label,
+                                "current": i,
+                                "total": total_transactions,
+                            },
+                        }
+                        await asyncio.sleep(0.05)
+                        continue
 
                     if response.status_code == 200:
                         yield f"Transaction created: {txn['description']} - {txn['amount']} - {txn['timestamp']}"
-                    elif response.status_code == 442:
+                    elif self._is_duplicate_transaction_response(response):
                         yield f"Transaction already exists: {txn['description']} - {txn['amount']} - {txn['timestamp']}"
                     else:
                         yield f"Error creating transaction in Firefly: {response.text}"
