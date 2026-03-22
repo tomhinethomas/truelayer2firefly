@@ -66,6 +66,13 @@ class Import2Firefly:
             return ""
         return "".join(iban.split())
 
+    @staticmethod
+    def _normalize_account_number(account_number: str | None) -> str:
+        """Normalize account numbers by stripping whitespace and casing."""
+        if not account_number:
+            return ""
+        return "".join(str(account_number).split()).upper()
+
     async def start_import(self) -> AsyncGenerator[Any, Any]:
         """Start the import process."""
 
@@ -110,7 +117,12 @@ class Import2Firefly:
                 if source_kind == "card":
                     source_label = self._card_labels(source)[0]
                 else:
-                    source_label = source["account_number"].get("iban") or source["account_id"]
+                    source_label = (
+                        source.get("account_number", {}).get("iban")
+                        or source.get("account_number", {}).get("number")
+                        or source.get("display_name")
+                        or source["account_id"]
+                    )
                 yield f"TrueLayer {source_kind}: {source['account_id']} - {source_label}"
                 await asyncio.sleep(0)
 
@@ -127,10 +139,21 @@ class Import2Firefly:
                     card_labels = self._card_labels(truelayer_source)
                     tr_label = card_labels[0]
                     tr_iban = None
+                    tr_account_number = None
+                    tr_account_name = None
                 else:
                     card_labels = []
-                    tr_iban = truelayer_source["account_number"].get("iban")
-                    tr_label = tr_iban or truelayer_source["account_id"]
+                    tr_iban = truelayer_source.get("account_number", {}).get("iban")
+                    tr_account_number = truelayer_source.get("account_number", {}).get(
+                        "number"
+                    )
+                    tr_account_name = truelayer_source.get("display_name")
+                    tr_label = (
+                        tr_iban
+                        or tr_account_number
+                        or tr_account_name
+                        or truelayer_source["account_id"]
+                    )
 
                 yield f"Checking matches for TrueLayer {source_kind}: {tr_label}"
 
@@ -140,23 +163,28 @@ class Import2Firefly:
                         ff_name = firefly_account["attributes"].get("name", "")
                         matched = ff_name in card_labels
                     else:
-                        # Match accounts by IBAN (existing behaviour)
                         ff_iban = firefly_account["attributes"].get("iban")
-                        matched = self._normalize_iban(tr_iban) == self._normalize_iban(
-                            ff_iban
+                        ff_account_number = firefly_account["attributes"].get(
+                            "account_number"
+                        )
+                        ff_name = firefly_account["attributes"].get("name")
+
+                        matched = (
+                            bool(self._normalize_iban(tr_iban))
+                            and self._normalize_iban(tr_iban)
+                            == self._normalize_iban(ff_iban)
+                        ) or (
+                            bool(self._normalize_account_number(tr_account_number))
+                            and self._normalize_account_number(tr_account_number)
+                            == self._normalize_account_number(ff_account_number)
+                        ) or (
+                            bool(tr_account_name) and tr_account_name == ff_name
                         )
 
                     if matched:
                         yield f"Matching account found: {tr_label}"
-                        if (
-                            firefly_account["attributes"].get("account_role")
-                            == "defaultAsset"
-                        ):
-                            import_account = firefly_account
-                            yield "Firefly account is a default asset account, let's continue"
-                            break
-                        else:
-                            yield "Firefly account matched, but is not a default asset"
+                        import_account = firefly_account
+                        break
                 else:
                     yield f"No matching Firefly account found for {tr_label}"
                     continue
@@ -191,6 +219,22 @@ class Import2Firefly:
                 for i, txn in enumerate(txns, start=1):
                     cp_iban = txn.get("meta", {}).get("counter_party_iban")
                     cp_name = txn.get("meta", {}).get("counter_party_preferred_name")
+                    merchant_name = txn.get("merchant_name") or cp_name or txn["description"]
+                    classifications = txn.get("transaction_classification") or []
+                    if isinstance(classifications, list):
+                        normalized_classifications = [c for c in classifications if c]
+                    elif classifications:
+                        normalized_classifications = [str(classifications)]
+                    else:
+                        normalized_classifications = []
+                    category_name = (
+                        normalized_classifications[0]
+                        if normalized_classifications
+                        else None
+                    )
+                    normalised_provider_transaction_id = txn.get(
+                        "normalised_provider_transaction_id"
+                    )
                     transaction_type = (
                         "debit" if txn["transaction_type"].lower() == "debit" else "credit"
                     )
@@ -264,7 +308,6 @@ class Import2Firefly:
                             yield f"Firefly: A total of {len(firefly_accounts)} account(s) found"
                     else:
                         unmatching += 1
-                        yield f"Transaction has no IBAN: {txn['description']}"
 
                     # Ensure the amount is always positive
                     amount = abs(txn["amount"])
@@ -295,11 +338,7 @@ class Import2Firefly:
                                 "destination_name": (
                                     import_account["attributes"]["name"]
                                     if transaction_type == "credit"
-                                    else (
-                                        "(unknown expense account)"
-                                        if linked_account is None
-                                        else linked_account["attributes"]["name"]
-                                    )
+                                    else merchant_name
                                 ),
                                 "source_id": (
                                     (
@@ -322,6 +361,14 @@ class Import2Firefly:
                                 "account_id": import_account["id"],
                                 "linked_account_id": (
                                     f"{source_kind}:{truelayer_source['account_id']}:{txn['transaction_id']}"
+                                ),
+                                "category_name": category_name,
+                                "tags": normalized_classifications,
+                                "notes": (
+                                    "normalised_provider_transaction_id: "
+                                    f"{normalised_provider_transaction_id}"
+                                    if normalised_provider_transaction_id
+                                    else None
                                 ),
                             }
                         ],
