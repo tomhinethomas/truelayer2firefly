@@ -159,9 +159,9 @@ class Import2Firefly:
 
                 for firefly_account in firefly_accounts:
                     if source_kind == "card":
-                        # Match cards by account name. We try a precise label first, then legacy display_name.
-                        ff_name = firefly_account["attributes"].get("name", "")
-                        matched = ff_name in card_labels
+                        ff_name = firefly_account["attributes"].get("name")
+                        ff_notes = firefly_account["attributes"].get("notes")
+                        matched = ff_name in card_labels or ff_notes in card_labels
                     else:
                         ff_iban = firefly_account["attributes"].get("iban")
                         ff_account_number = firefly_account["attributes"].get(
@@ -221,6 +221,9 @@ class Import2Firefly:
                     cp_name = txn.get("meta", {}).get("counter_party_preferred_name")
                     merchant_name = txn.get("merchant_name") or cp_name or txn["description"]
                     classifications = txn.get("transaction_classification") or []
+
+                    yield f"Processing transaction {i}/{total_transactions}: {txn['description']} - {txn['amount']} - {txn['timestamp']} - {classifications}"
+
                     if isinstance(classifications, list):
                         normalized_classifications = [c for c in classifications if c]
                     elif classifications:
