@@ -211,7 +211,9 @@ class Import2Firefly:
                 txns = parsed["results"]
                 yield f"TrueLayer: A total of {len(txns)} transaction(s) found"
                 yield "TrueLayer: Matching transactions to Firefly account"
-
+                
+                _LOGGER.info(txns);
+                
                 matching = 0
                 unmatching = 0
                 newly_created = 0
@@ -222,7 +224,6 @@ class Import2Firefly:
                     merchant_name = txn.get("merchant_name") or cp_name or txn["description"]
                     classifications = txn.get("transaction_classification") or []
 
-                    yield f"Processing transaction {i}/{total_transactions}: {txn['description']} - {txn['amount']} - {txn['timestamp']} - {classifications}"
 
                     if isinstance(classifications, list):
                         normalized_classifications = [c for c in classifications if c]
