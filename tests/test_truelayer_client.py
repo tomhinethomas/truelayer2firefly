@@ -121,3 +121,37 @@ async def test_response_status(
     )
     with pytest.raises(expected_exception):
         await truelayer_client._request("test")
+
+
+@respx.mock
+async def test_exchange_authorization_code() -> None:
+    """Test exchange_authorization_code sends correct form data and updates config."""
+    import jwt
+
+    fake_jwt = jwt.encode({"sub": "test_cred_id", "exp": 9999999999}, "secret", algorithm="HS256")
+    token_route = respx.post("https://auth.truelayer.com/connect/token").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "access_token": fake_jwt,
+                "refresh_token": "new_refresh_token",
+            },
+        )
+    )
+
+    async with TrueLayerClient(
+        client_id="test_client_id",
+        client_secret="test_client_secret",
+        redirect_uri="http://localhost/truelayer/callback",
+    ) as client:
+        await client.exchange_authorization_code(code="test_code_123")
+
+    assert token_route.called
+    sent_request = token_route.calls.last.request
+    sent_data = dict(httpx.QueryParams(sent_request.content.decode("utf-8")))
+    assert sent_data["grant_type"] == "authorization_code"
+    assert sent_data["client_id"] == "test_client_id"
+    assert sent_data["client_secret"] == "test_client_secret"
+    assert sent_data["redirect_uri"] == "http://localhost/truelayer/callback"
+    assert sent_data["code"] == "test_code_123"
+

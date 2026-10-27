@@ -29,24 +29,53 @@ class TrueLayerClient:
         client_id: str | None = None,
         client_secret: str | None = None,
         redirect_uri: str | None = None,
+        access_token: str | None = None,
     ):
         """Initialize the TrueLayer client"""
         self._config = Config()
-        self.client_id: str | None = (
-            self._config.get("truelayer_client_id") or client_id
-        )
-        self.client_secret: str | None = (
-            self._config.get("truelayer_client_secret") or client_secret
-        )
-        self.redirect_uri: str | None = (
-            self._config.get("truelayer_redirect_uri") or redirect_uri
-        )
-        self.access_token: str | None = (
-            self._config.get("truelayer_access_token") or None
-        )
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._redirect_uri = redirect_uri
+        self._access_token = access_token
 
         self._request_timeout = request_timeout
         self._client: httpx.AsyncClient | None = None
+
+    @property
+    def client_id(self) -> str | None:
+        """Get the client ID from config or instance attribute."""
+        return self._config.get("truelayer_client_id") or self._client_id
+
+    @client_id.setter
+    def client_id(self, value: str | None) -> None:
+        self._client_id = value
+
+    @property
+    def client_secret(self) -> str | None:
+        """Get the client secret from config or instance attribute."""
+        return self._config.get("truelayer_client_secret") or self._client_secret
+
+    @client_secret.setter
+    def client_secret(self, value: str | None) -> None:
+        self._client_secret = value
+
+    @property
+    def redirect_uri(self) -> str | None:
+        """Get the redirect URI from config or instance attribute."""
+        return self._config.get("truelayer_redirect_uri") or self._redirect_uri
+
+    @redirect_uri.setter
+    def redirect_uri(self, value: str | None) -> None:
+        self._redirect_uri = value
+
+    @property
+    def access_token(self) -> str | None:
+        """Get the access token from config or instance attribute."""
+        return self._config.get("truelayer_access_token") or self._access_token
+
+    @access_token.setter
+    def access_token(self, value: str | None) -> None:
+        self._access_token = value
 
     @property
     def lifetime(self) -> str | None:
@@ -102,7 +131,8 @@ class TrueLayerClient:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self._request_timeout)
 
-        await self._refresh_token()
+        if not auth:
+            await self._refresh_token()
 
         # Sanitize params and json by removing None values
         if params:
@@ -113,7 +143,7 @@ class TrueLayerClient:
         try:
             if method == "POST" and auth:
                 _LOGGER.debug("Sending POST request with form-encoded data")
-                headers = {"Content-Type": "application/x-www-form-urlencoded"}
+                headers["Content-Type"] = "application/x-www-form-urlencoded"
                 response = await self._client.request(
                     method=method,
                     url=url,
@@ -121,10 +151,8 @@ class TrueLayerClient:
                     data=params,
                 )
             else:
-                if self._config.get("truelayer_access_token"):
-                    headers["Authorization"] = (
-                        f"Bearer {self._config.get('truelayer_access_token')}"
-                    )
+                if self.access_token:
+                    headers["Authorization"] = f"Bearer {self.access_token}"
 
                 _LOGGER.debug("URL: %s", url)
                 response = await self._client.request(
@@ -173,13 +201,14 @@ class TrueLayerClient:
 
         params = {
             "grant_type": "refresh_token",
-            "client_id": self._config.get("truelayer_client_id"),
-            "client_secret": self._config.get("truelayer_client_secret"),
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
             "refresh_token": self._config.get("truelayer_refresh_token"),
         }
 
         headers = {
             "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
             "User-Agent": "TrueLayer2Firefly",
         }
 
@@ -190,7 +219,7 @@ class TrueLayerClient:
                 method="POST",
                 url=url,
                 headers=headers,
-                json=params,
+                data=params,
             )
             response.raise_for_status()
         except httpx.RequestError as err:
@@ -237,14 +266,20 @@ class TrueLayerClient:
 
         return str(URL("https://auth.truelayer.com").with_query(params))
 
-    async def exchange_authorization_code(self) -> None:
+    async def exchange_authorization_code(self, code: str | None = None) -> None:
         """Exchange the authorization code for an access token."""
+        auth_code = code or self._config.get("truelayer_code")
+        if not auth_code:
+            raise TrueLayer2FireflyError(
+                "No authorization code provided or found in configuration"
+            )
+
         params = {
             "grant_type": "authorization_code",
             "client_id": self.client_id,
             "client_secret": self.client_secret,
             "redirect_uri": self.redirect_uri,
-            "code": self._config.get("truelayer_code"),
+            "code": auth_code,
         }
 
         response = await self._request(
@@ -267,13 +302,17 @@ class TrueLayerClient:
 
     async def _extract_info_from_token(self) -> None:
         """Extract information from the access token."""
+        token = self._config.get("truelayer_access_token")
+        if not token:
+            return
         decoded = jwt.decode(
-            self._config.get("truelayer_access_token"),
+            token,
             options={"verify_signature": False},
-            algorithms=["RS256"],
         )
-        self._config.set("truelayer_credentials_id", decoded["sub"])
-        self._config.set("truelayer_expiration_date", decoded["exp"])
+        if "sub" in decoded:
+            self._config.set("truelayer_credentials_id", decoded["sub"])
+        if "exp" in decoded:
+            self._config.set("truelayer_expiration_date", decoded["exp"])
 
     async def get_accounts(self) -> Any:
         """Get the accounts from TrueLayer."""

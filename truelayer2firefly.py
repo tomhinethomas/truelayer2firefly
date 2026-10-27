@@ -271,6 +271,10 @@ async def truelayer_configuration(
     config.set("truelayer_client_secret", truelayer_client_secret)
     config.set("truelayer_redirect_uri", truelayer_redirect_uri)
 
+    truelayer.client_id = truelayer_client_id
+    truelayer.client_secret = truelayer_client_secret
+    truelayer.redirect_uri = truelayer_redirect_uri
+
     auth_url = await truelayer.get_authorization_url()
     _LOGGER.info("Authorization URL: %s", auth_url)
 
@@ -287,26 +291,47 @@ async def get_access_token(
     _LOGGER.info("Access token successfully retrieved.")
     _LOGGER.info("TrueLayer connections configured: %d", len(connections))
 
-    return RedirectResponse(
-        str(request.url_for("index")),
-        status_code=302,
-    )
+    return RedirectResponse(url="/", status_code=302)
 
 
 @app.get("/truelayer/callback")
-async def callback(request: Request) -> None:
+async def callback(
+    request: Request,
+    truelayer: TrueLayerClient = Depends(get_truelayer_client),
+) -> RedirectResponse:
     """Handle the callback from TrueLayer."""
+    error = request.query_params.get("error")
+    error_description = request.query_params.get("error_description")
+    if error:
+        _LOGGER.error("TrueLayer callback error: %s - %s", error, error_description)
+        raise HTTPException(
+            status_code=400,
+            detail=f"TrueLayer authorization error: {error} ({error_description})",
+        )
+
     code = request.query_params.get("code")
     scope = request.query_params.get("scope")
 
+    if not code:
+        _LOGGER.error(
+            "No authorization code received in callback: %s", request.query_params
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="Missing authorization code in TrueLayer callback",
+        )
+
     _LOGGER.info("Received code: %s and scope: %s", code, scope)
     config.set("truelayer_code", code)
-    config.set("truelayer_scope", scope)
+    if scope:
+        config.set("truelayer_scope", scope)
 
-    return RedirectResponse(
-        str(request.url_for("truelayer/get-access-token")),
-        status_code=302,
-    )
+    await truelayer.exchange_authorization_code(code=code)
+    connections = upsert_active_truelayer_connection(config)
+    _LOGGER.info("Access token successfully retrieved.")
+    _LOGGER.info("TrueLayer connections configured: %d", len(connections))
+
+    return RedirectResponse(url="/", status_code=302)
 
 
 @app.get("/truelayer/healthcheck")
